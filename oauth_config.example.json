@@ -1,0 +1,18 @@
+{
+  "enabled": false,
+  "client_id": "COMPANY_CLIENT_ID",
+  "client_secret": "COMPANY_CLIENT_SECRET",
+  "authorization_endpoint": "https://sso.example.internal/oauth2/authorize",
+  "token_endpoint": "https://sso.example.internal/oauth2/token",
+  "userinfo_endpoint": "https://sso.example.internal/oauth2/userinfo",
+  "redirect_uri": "https://exam.example.internal/auth/callback",
+  "scopes": "openid profile email",
+  "identity_claim": "sub",
+  "name_claim": "name",
+  "employee_id_claim": "employee_id",
+  "admin_subjects": ["ADMIN_OAUTH_SUBJECT"],
+  "admin_employee_ids": [],
+  "token_auth_method": "client_secret_basic",
+  "session_hours": 8,
+  "cookie_secure": true
+}
