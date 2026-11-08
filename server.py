@@ -95,6 +95,11 @@ def good_exam(e):
     if not isinstance(qs,list) or len(qs)>200:raise ValueError('题目数量不合法')
     for q in qs:
         if q.get('type') not in ('single','multi','text') or not str(q.get('title','')).strip() or float(q.get('score',0))<=0:raise ValueError('题目类型、内容或分值错误')
+        # Optional fields: legacy JSON exams remain readable.
+        for field in ('description','scenario','requirements','deliverable','rubric','knowledge','difficulty','explain'):
+            value=q.get(field,'')
+            if not isinstance(value,str) or len(value)>20000:
+                raise ValueError(f'题目字段 {field} 格式错误或内容过长')
         if not isinstance(q.get('attachments',[]),list):raise ValueError('附件字段无效')
         if q['type']!='text':
             opts=q.get('opts',[])
