@@ -77,7 +77,7 @@ def sanitized(db,admin):
         result['leaderboard']=[{'name':v['name'],'total':v['total'],'n':v['n']} for v in sorted((lambda scores:list(scores.values()))(aggregate_scores(db)),key=lambda x:-x['total'])]
         result['submissions']=[]  # never expose IDs, raw answers, or individual submissions
         result.pop('attempts',None) # ongoing exams include sensitive employee identifiers
-        result['files']=[f for f in result['files'] if f['kind']!='answer' or any(e['id']==f['examId'] and e.get('answersReleased') for e in result['exams'])]
+        result['files']=[f for f in result['files'] if f.get('kind')!='submission' and (f.get('kind')!='answer' or any(e['id']==f['examId'] and e.get('answersReleased') for e in result['exams']))]
         result['files']=[f for f in result['files'] if any(e['id']==f['examId'] for e in result['exams'])]
     return result
 
