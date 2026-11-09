@@ -380,7 +380,7 @@ class Handler(BaseHTTPRequestHandler):
                         existing={'id':'a'+uuid.uuid4().hex,'examId':eid,'name':name,'employeeId':empid,'subject':p['subject'] if p else '', 'startedAt':iso_utc(),'startedTs':timestamp()}
                         attempts.append(existing)
                     save(db)
-                    return self.reply(200,{'attemptId':existing['id'],'startedAt':existing['startedAt'],'durationLimitSeconds':int(e.get('duration',60))*60})
+                    return self.reply(200,{'attemptId':existing['id'],'startedAt':existing['startedAt'],'durationLimitSeconds':int(e.get('duration',60))*60,'files':[{'id':f['id'],'name':f['name'],'size':f['size']} for f in db['files'] if f.get('kind')=='submission' and f.get('attemptId')==existing['id']]})
                 if path=='/api/submit':
                     eid=str(data.get('examId','')); name=str(data.get('name','')).strip();empid=str(data.get('employeeId','')).strip();answers=data.get('answers',{})
                     if not name or len(name)>60 or not empid or len(empid)>40 or not isinstance(answers,dict):raise ValueError('姓名、工号或答案不合法')
@@ -399,7 +399,12 @@ class Handler(BaseHTTPRequestHandler):
                     valid={q['id']:str(answers.get(q['id'],''))[:20000] for q in e['qs']}
                     obj=scoring(e,valid);manual_needed=any(q['type']=='text' for q in e['qs'])
                     sub={'id':'s'+uuid.uuid4().hex,'examId':eid,'name':name,'employeeId':empid,'answers':valid,'objective':obj,'manual':0,'score':obj,'graded':not manual_needed,'at':now.isoformat(),'startedAt':attempt['startedAt'],'durationSeconds':elapsed,'feedback':''}
-                    db['submissions'].append(sub);db['attempts']=[x for x in db.get('attempts',[]) if x['id']!=attempt['id']];save(db)
+                    db['submissions'].append(sub)
+                    for f in db['files']:
+                        if f.get('kind')=='submission' and f.get('attemptId')==attempt['id']:
+                            f['submissionId']=sub['id']
+                    db['attempts']=[x for x in db.get('attempts',[]) if x['id']!=attempt['id']]
+                    save(db)
                     return self.reply(200,{'ok':True,'id':sub['id']})
                 if path=='/api/grade':
                     if not self.admin():return self.reply(403,{'error':'管理员密码错误'})
