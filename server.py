@@ -77,7 +77,7 @@ def sanitized(db,admin):
         result['leaderboard']=[{'name':v['name'],'total':v['total'],'n':v['n']} for v in sorted((lambda scores:list(scores.values()))(aggregate_scores(db)),key=lambda x:-x['total'])]
         result['submissions']=[]  # never expose IDs, raw answers, or individual submissions
         result.pop('attempts',None) # ongoing exams include sensitive employee identifiers
-        result['files']=[f for f in result['files'] if f['kind']!='answer' or any(e['id']==f['examId'] and e.get('answersReleased') for e in result['exams'])]
+        result['files']=[f for f in result['files'] if f.get('kind')!='submission' and (f.get('kind')!='answer' or any(e['id']==f['examId'] and e.get('answersReleased') for e in result['exams']))]
         result['files']=[f for f in result['files'] if any(e['id']==f['examId'] for e in result['exams'])]
     return result
 
@@ -224,7 +224,13 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 db=load(); f=next((f for f in db['files'] if f['id']==fid),None)
                 exam=next((e for e in db['exams'] if f and e['id']==f['examId']),None)
-                allowed=bool(f and exam and (self.admin() or exam.get('published') and (f['kind']!='answer' or exam.get('answersReleased'))))
+                allowed=bool(f and exam and (self.admin() or
+                    (f.get('kind')=='submission' and any(
+                        a['id']==self.headers.get('X-Attempt-Id','') and a['id']==f.get('attemptId')
+                        and (not OAUTH['enabled'] or (self.principal() and a.get('subject')==self.principal().get('subject')))
+                        for a in db.get('attempts',[]))) or
+                    (f.get('kind')!='submission' and exam.get('published') and
+                     (f.get('kind')!='answer' or exam.get('answersReleased')))))
             if not allowed:return self.reply(403,{'error':'文件无访问权限'})
             disk=UPLOADS/fid
             if not disk.is_file():return self.reply(404,{'error':'文件不存在'})
@@ -249,6 +255,46 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if OAUTH['enabled'] and (not self.authenticated() or not self.allowed_origin()):return self.reply(403,{'error':'未登录或请求来源不合法'})
             if path=='/api/login':return self.reply(200,{'admin':self.admin()})
+            if path=='/api/student-upload':
+                aid=self.headers.get('X-Attempt-Id','')
+                eid=self.headers.get('X-Exam-Id','')
+                name=pathlib.Path(unquote(self.headers.get('X-File-Name',''))).name
+                if not name or name in ('.','..') or len(name)>180:raise ValueError('文件名不合法')
+                try:length=int(self.headers.get('Content-Length','0'))
+                except ValueError:raise ValueError('无效的文件大小')
+                if length<=0 or length>MAX_FILE:raise ValueError(f'文件为空或超过 {APP_CONFIG["max_upload_mb"]} MB 限制')
+                def eligible(db):
+                    a=next((a for a in db.get('attempts',[]) if a['id']==aid and a['examId']==eid),None)
+                    e=next((e for e in db['exams'] if e['id']==eid and e.get('published')),None)
+                    p=self.principal()
+                    if not a or not e:raise ValueError('考试未开始或已提交')
+                    if OAUTH['enabled'] and (not p or a.get('subject')!=p.get('subject')):raise ValueError('考试账号身份不匹配')
+                    if not datetime.fromisoformat(e['start'])<=datetime.now()<=datetime.fromisoformat(e['end']):raise ValueError('当前不在考试时间内')
+                    if timestamp()-a['startedTs']>int(e.get('duration',60))*60+10:raise ValueError('考试时长已结束')
+                    return a
+                with LOCK:
+                    eligible(load())
+                fid='f'+uuid.uuid4().hex
+                tmp=UPLOADS/(fid+'.part')
+                try:
+                    remaining=length
+                    with tmp.open('wb') as sink:
+                        while remaining:
+                            chunk=self.rfile.read(min(FILE_CHUNK,remaining))
+                            if not chunk:raise ConnectionError('上传中断')
+                            sink.write(chunk);remaining-=len(chunk)
+                    with LOCK:
+                        db=load();a=eligible(db)
+                        record={'id':fid,'examId':eid,'attemptId':aid,'employeeId':a['employeeId'],
+                                'kind':'submission','name':name,'size':length,'created':iso_utc()}
+                        os.replace(tmp,UPLOADS/fid)
+                        try:
+                            db['files'].append(record);save(db)
+                        except Exception:
+                            (UPLOADS/fid).unlink(missing_ok=True);raise
+                    return self.reply(200,{'file':record})
+                finally:
+                    tmp.unlink(missing_ok=True)
             if path=='/api/upload':
                 if not self.admin():return self.reply(403,{'error':'管理员密码错误'})
                 eid=self.headers.get('X-Exam-Id','');qid=self.headers.get('X-Question-Id','')
@@ -334,7 +380,7 @@ class Handler(BaseHTTPRequestHandler):
                         existing={'id':'a'+uuid.uuid4().hex,'examId':eid,'name':name,'employeeId':empid,'subject':p['subject'] if p else '', 'startedAt':iso_utc(),'startedTs':timestamp()}
                         attempts.append(existing)
                     save(db)
-                    return self.reply(200,{'attemptId':existing['id'],'startedAt':existing['startedAt'],'durationLimitSeconds':int(e.get('duration',60))*60})
+                    return self.reply(200,{'attemptId':existing['id'],'startedAt':existing['startedAt'],'durationLimitSeconds':int(e.get('duration',60))*60,'files':[{'id':f['id'],'name':f['name'],'size':f['size']} for f in db['files'] if f.get('kind')=='submission' and f.get('attemptId')==existing['id']]})
                 if path=='/api/submit':
                     eid=str(data.get('examId','')); name=str(data.get('name','')).strip();empid=str(data.get('employeeId','')).strip();answers=data.get('answers',{})
                     if not name or len(name)>60 or not empid or len(empid)>40 or not isinstance(answers,dict):raise ValueError('姓名、工号或答案不合法')
@@ -353,7 +399,12 @@ class Handler(BaseHTTPRequestHandler):
                     valid={q['id']:str(answers.get(q['id'],''))[:20000] for q in e['qs']}
                     obj=scoring(e,valid);manual_needed=any(q['type']=='text' for q in e['qs'])
                     sub={'id':'s'+uuid.uuid4().hex,'examId':eid,'name':name,'employeeId':empid,'answers':valid,'objective':obj,'manual':0,'score':obj,'graded':not manual_needed,'at':now.isoformat(),'startedAt':attempt['startedAt'],'durationSeconds':elapsed,'feedback':''}
-                    db['submissions'].append(sub);db['attempts']=[x for x in db.get('attempts',[]) if x['id']!=attempt['id']];save(db)
+                    db['submissions'].append(sub)
+                    for f in db['files']:
+                        if f.get('kind')=='submission' and f.get('attemptId')==attempt['id']:
+                            f['submissionId']=sub['id']
+                    db['attempts']=[x for x in db.get('attempts',[]) if x['id']!=attempt['id']]
+                    save(db)
                     return self.reply(200,{'ok':True,'id':sub['id']})
                 if path=='/api/grade':
                     if not self.admin():return self.reply(403,{'error':'管理员密码错误'})
@@ -365,6 +416,26 @@ class Handler(BaseHTTPRequestHandler):
                     if not 0<=manual<=max_manual:raise ValueError('人工评分超出范围')
                     sub.update(manual=manual,score=sub['objective']+manual,graded=True,feedback=str(data.get('feedback',''))[:3000])
                     save(db);return self.reply(200,{'ok':True})
+                if path=='/api/delete-file':
+                    fid=str(data.get('id',''))
+                    f=next((x for x in db['files'] if x['id']==fid),None)
+                    if not f:raise ValueError('附件不存在')
+                    if not self.admin():
+                        attempt_id=str(data.get('attemptId',''))
+                        attempt=next((a for a in db.get('attempts',[]) if a['id']==attempt_id and a['id']==f.get('attemptId') and a['examId']==f['examId']),None)
+                        if f.get('kind')!='submission' or not attempt or f.get('submissionId'):
+                            return self.reply(403,{'error':'只有管理员可删除已提交的附件'})
+                        p=self.principal()
+                        if OAUTH['enabled'] and (not p or attempt.get('subject')!=p.get('subject')):
+                            return self.reply(403,{'error':'无权操作其他考生的附件'})
+                    db['files']=[x for x in db['files'] if x['id']!=fid]
+                    for ex in db['exams']:
+                        if ex['id']==f['examId']:
+                            for q in ex['qs']:
+                                if fid in q.get('attachments',[]):q['attachments'].remove(fid)
+                    save(db)
+                    (UPLOADS/fid).unlink(missing_ok=True)
+                    return self.reply(200,{'ok':True})
                 if path=='/api/delete-exam':
                     if not self.admin():return self.reply(403,{'error':'管理员密码错误'})
                     eid=data.get('id');db['exams']=[e for e in db['exams'] if e['id']!=eid]
