@@ -371,6 +371,26 @@ class Handler(BaseHTTPRequestHandler):
                     if not 0<=manual<=max_manual:raise ValueError('人工评分超出范围')
                     sub.update(manual=manual,score=sub['objective']+manual,graded=True,feedback=str(data.get('feedback',''))[:3000])
                     save(db);return self.reply(200,{'ok':True})
+                if path=='/api/delete-file':
+                    fid=str(data.get('id',''))
+                    f=next((x for x in db['files'] if x['id']==fid),None)
+                    if not f:raise ValueError('附件不存在')
+                    if not self.admin():
+                        attempt_id=str(data.get('attemptId',''))
+                        attempt=next((a for a in db.get('attempts',[]) if a['id']==attempt_id and a['id']==f.get('attemptId') and a['examId']==f['examId']),None)
+                        if f.get('kind')!='submission' or not attempt or f.get('submissionId'):
+                            return self.reply(403,{'error':'只有管理员可删除已提交的附件'})
+                        p=self.principal()
+                        if OAUTH['enabled'] and (not p or attempt.get('subject')!=p.get('subject')):
+                            return self.reply(403,{'error':'无权操作其他考生的附件'})
+                    db['files']=[x for x in db['files'] if x['id']!=fid]
+                    for ex in db['exams']:
+                        if ex['id']==f['examId']:
+                            for q in ex['qs']:
+                                if fid in q.get('attachments',[]):q['attachments'].remove(fid)
+                    save(db)
+                    (UPLOADS/fid).unlink(missing_ok=True)
+                    return self.reply(200,{'ok':True})
                 if path=='/api/delete-exam':
                     if not self.admin():return self.reply(403,{'error':'管理员密码错误'})
                     eid=data.get('id');db['exams']=[e for e in db['exams'] if e['id']!=eid]
