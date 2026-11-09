@@ -9,7 +9,22 @@ from urllib.parse import urlsplit, unquote, quote
 
 ROOT=pathlib.Path(__file__).resolve().parent
 DATA=ROOT/'data'; UPLOADS=DATA/'uploads'; STATE=DATA/'state.json'
-LOCK=threading.RLock(); MAX_FILE=25*1024*1024; MAX_JSON=5*1024*1024
+LOCK=threading.RLock(); MAX_JSON=5*1024*1024
+# File limits are configured via app_config.json; no database is required.
+APP_CONFIG_FILE=ROOT/'app_config.json'
+def load_app_config():
+    default={'max_upload_mb':8192}
+    if APP_CONFIG_FILE.exists():
+        values=json.loads(APP_CONFIG_FILE.read_text(encoding='utf-8'))
+        if not isinstance(values,dict):raise SystemExit('app_config.json 必须是 JSON 对象')
+        default.update(values)
+    mb=default['max_upload_mb']
+    if isinstance(mb,bool) or not isinstance(mb,int) or not (1<=mb<=65536):
+        raise SystemExit('app_config.json 的 max_upload_mb 必须是 1 到 65536 之间的整数')
+    return default
+APP_CONFIG=load_app_config()
+MAX_FILE=APP_CONFIG['max_upload_mb']*1024*1024
+FILE_CHUNK=4*1024*1024
 ADMIN_PASSWORD='dbzz123'
 DATA.mkdir(exist_ok=True); UPLOADS.mkdir(exist_ok=True)
 # OAuth2 / OIDC Authorization Code + PKCE; credentials never sent to the browser.
@@ -187,6 +202,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path=urlsplit(self.path).path
         if path=='/api/auth-config':return self.reply(200,public_auth_state())
+        if path=='/api/app-config':return self.reply(200,{'max_upload_mb':APP_CONFIG['max_upload_mb']})
         if path=='/api/me':
             p=self.principal()
             if OAUTH['enabled'] and not p:return self.reply(401,{'error':'请先通过公司账号登录'})
@@ -212,11 +228,17 @@ class Handler(BaseHTTPRequestHandler):
             if not allowed:return self.reply(403,{'error':'文件无访问权限'})
             disk=UPLOADS/fid
             if not disk.is_file():return self.reply(404,{'error':'文件不存在'})
-            data=disk.read_bytes();self.send_response(200)
+            self.send_response(200)
             # Never execute uploaded HTML/SVG or other active content.
             self.send_header('Content-Type','application/octet-stream');self.send_header('X-Content-Type-Options','nosniff')
             self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(f['name']))
-            self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            self.send_header('Content-Length',str(disk.stat().st_size));self.end_headers()
+            with disk.open('rb') as source:
+                while True:
+                    chunk=source.read(FILE_CHUNK)
+                    if not chunk:break
+                    self.wfile.write(chunk)
+            return
         if path in ('/','/index.html'):
             data=(ROOT/'index.html').read_bytes();self.send_response(200)
             self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Cache-Control','no-store')
@@ -232,18 +254,42 @@ class Handler(BaseHTTPRequestHandler):
                 eid=self.headers.get('X-Exam-Id','');qid=self.headers.get('X-Question-Id','')
                 kind=self.headers.get('X-File-Kind','');name=pathlib.Path(unquote(self.headers.get('X-File-Name',''))).name
                 if kind not in ('exam','answer','question') or not name or len(name)>180:raise ValueError('附件信息不合法')
-                blob=self.raw(MAX_FILE);fid='f'+uuid.uuid4().hex
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                except ValueError:raise ValueError('无效的文件长度')
+                if length<=0:raise ValueError('上传文件为空或缺少 Content-Length')
+                if length>MAX_FILE:raise ValueError(f'文件超过上传上限 {APP_CONFIG["max_upload_mb"]} MB')
                 with LOCK:
                     db=load();e=next((e for e in db['exams'] if e['id']==eid),None)
                     if not e:raise ValueError('请先保存考试再上传附件')
                     if kind=='question' and not any(q['id']==qid for q in e['qs']):raise ValueError('题目不存在')
-                    record={'id':fid,'examId':eid,'questionId':qid if kind=='question' else None,'kind':kind,'name':name,'size':len(blob),'created':datetime.now().isoformat()}
-                    (UPLOADS/fid).write_bytes(blob)
-                    db['files'].append(record)
-                    if kind=='question':
-                        q=next(q for q in e['qs'] if q['id']==qid);q.setdefault('attachments',[]).append(fid)
-                    save(db)
-                return self.reply(200,{'file':record})
+                fid='f'+uuid.uuid4().hex
+                tmp=UPLOADS/(fid+'.part')
+                try:
+                    remaining=length
+                    with tmp.open('wb') as dest:
+                        while remaining:
+                            part=self.rfile.read(min(FILE_CHUNK,remaining))
+                            if not part:raise ConnectionError('上传连接中断')
+                            dest.write(part)
+                            remaining-=len(part)
+                    with LOCK:
+                        db=load();e=next((e for e in db['exams'] if e['id']==eid),None)
+                        if not e:raise ValueError('考试已被删除，请重新上传')
+                        if kind=='question' and not any(q['id']==qid for q in e['qs']):raise ValueError('题目已被删除，请重新上传')
+                        record={'id':fid,'examId':eid,'questionId':qid if kind=='question' else None,'kind':kind,'name':name,'size':length,'created':datetime.now().isoformat()}
+                        os.replace(tmp,UPLOADS/fid)
+                        try:
+                            db['files'].append(record)
+                            if kind=='question':
+                                q=next(q for q in e['qs'] if q['id']==qid);q.setdefault('attachments',[]).append(fid)
+                            save(db)
+                        except Exception:
+                            (UPLOADS/fid).unlink(missing_ok=True)
+                            raise
+                    return self.reply(200,{'file':record})
+                finally:
+                    tmp.unlink(missing_ok=True)
             data=self.body()
             with LOCK:
                 db=load()
@@ -337,6 +383,6 @@ class Handler(BaseHTTPRequestHandler):
 if __name__=='__main__':
     a=argparse.ArgumentParser();a.add_argument('--host',default='0.0.0.0');a.add_argument('--port',type=int,default=8080);args=a.parse_args()
     http=ThreadingHTTPServer((args.host,args.port),Handler)
-    print(f'DevArena 启动：http://127.0.0.1:{args.port}  | 局域网：http://本机IP:{args.port}',flush=True)
+    print(f'DevArena 启动：http://127.0.0.1:{args.port}  | 局域网：http://本机IP:{args.port}  | 单文件上限：{APP_CONFIG["max_upload_mb"]} MB',flush=True)
     try:http.serve_forever()
     except KeyboardInterrupt:pass

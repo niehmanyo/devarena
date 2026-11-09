@@ -44,7 +44,7 @@ DevArena 面向软件研发团队的持续技术能力建设，将 C++ Core Dump
 | --- | --- |
 | 考试管理 | 新建、编辑、发布与取消发布，配置考试窗口、答题时长和分数 |
 | 在线试题 | 单选、多选、简答题；题干、选项、参考答案和解析 |
-| 附件管理 | 上传考试文档、答案文档、题目截图及相关文件；单文件最大 25 MB |
+| 附件管理 | 上传考试文档、答案文档、题目截图及相关文件；单文件上限由 `app_config.json` 配置（默认 8 GB） |
 | 在线答题 | 学员录入姓名、工号，按考试时段开始与提交；同一场考试按工号避免重复提交 |
 | 阅卷评分 | 客观题自动评分；主观题由管理员填写总得分和评语 |
 | 考试计时 | 服务端记录开始、提交时间，统计每位学生的实际作答时长；刷新不重新计时 |
@@ -114,7 +114,52 @@ python3 server.py --host 0.0.0.0 --port 8080
 
 **Windows：** 在目录下运行 `start.bat 8080`（需要 Python 3 和 `py` 启动器）。
 
-### 4. 体验考试流程
+### 4. 配置最大上传文件大小（Core Dump）
+
+在项目根目录编辑 `app_config.json`：
+
+```json
+{
+  "max_upload_mb": 8192
+}
+```
+
+`max_upload_mb` 的单位为 **MB（MiB，1024² 字节）**，默认 **8192 MB（8 GiB）**。例如需要支持单个 16 GiB 的 Core Dump，将其改为 `16384`。有效范围为 1–65536（最大 64 GiB）。修改配置后**重启 Python 服务**生效；前端上传提示会从服务端同步读取。
+
+上传与下载均采用 **4 MiB 分块流式处理**，不会一次性把整个 Core Dump 读入 Python 内存；上传失败时会清理未完成的临时文件。注意预留磁盘空间。
+
+如果使用 Nginx / 公司网关，还必须同步调整反向代理的请求体限制与超时设置（参考下方 Nginx 示例）；否则可能收到 `413 Request Entity Too Large`。例如上限改为 16 GiB 时使用 `client_max_body_size 16384m;`。
+
+### 5. 使用 nohup 后台启动（Linux）
+
+```bash
+# 在仓库根目录，端口默认 8080
+bash start-background.sh start 8080
+
+# 查看服务状态
+bash start-background.sh status
+
+# 实时查看日志
+bash start-background.sh logs
+
+# 重启以加载更新后的 app_config.json
+bash start-background.sh restart 8080
+
+# 停止服务
+bash start-background.sh stop
+```
+
+脚本通过 `nohup` 启动 `python3 -u server.py`，将运行日志追加到 `devarena.log`，进程号写入 `devarena.pid`；关闭 SSH 终端后网站仍继续运行。日志和 PID 文件已添加到 `.gitignore`。请勿在同一端口同时运行前台与后台实例。
+
+如果想直接使用原生 `nohup` 指令：
+
+```bash
+nohup python3 -u server.py --host 0.0.0.0 --port 8080 > devarena.log 2>&1 < /dev/null &
+```
+
+服务器重启自动恢复应使用下文的 `systemd`，`nohup` 本身不提供开机自启。
+
+### 6. 体验考试流程
 
 1. 管理员进入「考试管理」创建考试，选择单选、多选或简答题，设置开始/结束时间并保存。
 2. 通过「上传附件」添加考试文档、标准答案文档和题目截图；可将附件关联指定题目。
@@ -122,7 +167,7 @@ python3 server.py --host 0.0.0.0 --port 8080
 4. 提交后，管理员在「阅卷管理」查看答卷、用时，填写主观题得分与评语。
 5. 完成评分后，成绩进入「积分排行榜」；管理员可单独决定何时公开标准答案。
 
-### 5. 后台常驻（可选：systemd）
+### 7. 后台常驻与开机自启（可选：systemd）
 
 将下列示例保存为 `/etc/systemd/system/devarena.service`，把路径和运行用户改为实际值：
 
@@ -202,7 +247,10 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Real-IP $remote_addr;
-        client_max_body_size 26m;
+        client_max_body_size 8192m;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 }
 ```
@@ -217,7 +265,9 @@ server {
 .
 ├── index.html                   # 单页前端
 ├── server.py                    # Python HTTP / API / OAuth2 服务
-├── start.sh                     # Linux / macOS 启动
+├── start.sh                     # Linux / macOS 前台启动
+├── start-background.sh          # Linux nohup 后台运行、停止和查看日志
+├── app_config.json              # 上传上限（MB），默认 8192
 ├── start.bat                    # Windows 启动
 ├── oauth_config.example.json    # OAuth2 配置模板（不包含真实密钥）
 ├── .gitignore

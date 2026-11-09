@@ -1,3 +1,6 @@
 data/
 oauth_config.json
 __pycache__/
+devarena.log
+devarena.pid
+*.part
