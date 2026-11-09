@@ -224,7 +224,13 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 db=load(); f=next((f for f in db['files'] if f['id']==fid),None)
                 exam=next((e for e in db['exams'] if f and e['id']==f['examId']),None)
-                allowed=bool(f and exam and (self.admin() or exam.get('published') and (f['kind']!='answer' or exam.get('answersReleased'))))
+                allowed=bool(f and exam and (self.admin() or
+                    (f.get('kind')=='submission' and any(
+                        a['id']==self.headers.get('X-Attempt-Id','') and a['id']==f.get('attemptId')
+                        and (not OAUTH['enabled'] or (self.principal() and a.get('subject')==self.principal().get('subject')))
+                        for a in db.get('attempts',[]))) or
+                    (f.get('kind')!='submission' and exam.get('published') and
+                     (f.get('kind')!='answer' or exam.get('answersReleased')))))
             if not allowed:return self.reply(403,{'error':'文件无访问权限'})
             disk=UPLOADS/fid
             if not disk.is_file():return self.reply(404,{'error':'文件不存在'})
