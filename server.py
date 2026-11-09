@@ -255,6 +255,46 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if OAUTH['enabled'] and (not self.authenticated() or not self.allowed_origin()):return self.reply(403,{'error':'未登录或请求来源不合法'})
             if path=='/api/login':return self.reply(200,{'admin':self.admin()})
+            if path=='/api/student-upload':
+                aid=self.headers.get('X-Attempt-Id','')
+                eid=self.headers.get('X-Exam-Id','')
+                name=pathlib.Path(unquote(self.headers.get('X-File-Name',''))).name
+                if not name or name in ('.','..') or len(name)>180:raise ValueError('文件名不合法')
+                try:length=int(self.headers.get('Content-Length','0'))
+                except ValueError:raise ValueError('无效的文件大小')
+                if length<=0 or length>MAX_FILE:raise ValueError(f'文件为空或超过 {APP_CONFIG["max_upload_mb"]} MB 限制')
+                def eligible(db):
+                    a=next((a for a in db.get('attempts',[]) if a['id']==aid and a['examId']==eid),None)
+                    e=next((e for e in db['exams'] if e['id']==eid and e.get('published')),None)
+                    p=self.principal()
+                    if not a or not e:raise ValueError('考试未开始或已提交')
+                    if OAUTH['enabled'] and (not p or a.get('subject')!=p.get('subject')):raise ValueError('考试账号身份不匹配')
+                    if not datetime.fromisoformat(e['start'])<=datetime.now()<=datetime.fromisoformat(e['end']):raise ValueError('当前不在考试时间内')
+                    if timestamp()-a['startedTs']>int(e.get('duration',60))*60+10:raise ValueError('考试时长已结束')
+                    return a
+                with LOCK:
+                    eligible(load())
+                fid='f'+uuid.uuid4().hex
+                tmp=UPLOADS/(fid+'.part')
+                try:
+                    remaining=length
+                    with tmp.open('wb') as sink:
+                        while remaining:
+                            chunk=self.rfile.read(min(FILE_CHUNK,remaining))
+                            if not chunk:raise ConnectionError('上传中断')
+                            sink.write(chunk);remaining-=len(chunk)
+                    with LOCK:
+                        db=load();a=eligible(db)
+                        record={'id':fid,'examId':eid,'attemptId':aid,'employeeId':a['employeeId'],
+                                'kind':'submission','name':name,'size':length,'created':iso_utc()}
+                        os.replace(tmp,UPLOADS/fid)
+                        try:
+                            db['files'].append(record);save(db)
+                        except Exception:
+                            (UPLOADS/fid).unlink(missing_ok=True);raise
+                    return self.reply(200,{'file':record})
+                finally:
+                    tmp.unlink(missing_ok=True)
             if path=='/api/upload':
                 if not self.admin():return self.reply(403,{'error':'管理员密码错误'})
                 eid=self.headers.get('X-Exam-Id','');qid=self.headers.get('X-Question-Id','')
