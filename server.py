@@ -87,7 +87,7 @@ def report_metrics(db):
         board['name']=name
         board['points']+=float(sub.get('score',0))
         board['count']+=1
-        students.setdefault(person,[]).append((dt,round(pct,1),name))
+        students.setdefault(person,[]).append((dt.timestamp(),round(pct,1),name))
         cat=str(exam.get('category','综合'))[:60]
         item=categories.setdefault(cat,{'name':cat,'count':0,'percentSum':0})
         item['count']+=1
@@ -156,7 +156,7 @@ def good_exam(e):
     for q in qs:
         if q.get('type') not in ('single','multi','text') or not str(q.get('title','')).strip() or float(q.get('score',0))<=0:raise ValueError('题目类型、内容或分值错误')
         # Optional fields: legacy JSON exams remain readable.
-        for field in ('description','scenario','requirements','deliverable','rubric','knowledge','difficulty','explain'):
+        for field in ('description','scenario','requirements','deliverable','rubric','knowledge','difficulty','category','explain'):
             value=q.get(field,'')
             if not isinstance(value,str) or len(value)>20000:
                 raise ValueError(f'题目字段 {field} 格式错误或内容过长')
