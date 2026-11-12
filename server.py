@@ -67,8 +67,53 @@ def save(db):
     temp=DATA/('state-'+uuid.uuid4().hex+'.tmp')
     temp.write_text(json.dumps(db,ensure_ascii=False,indent=2),'utf-8')
     os.replace(temp,STATE)
+def report_metrics(db):
+    exams={e['id']:e for e in db.get('exams',[])}
+    quarters={}
+    students={}
+    categories={}
+    durations=[]
+    for sub in db.get('submissions',[]):
+        if not sub.get('graded') or sub.get('examId') not in exams:continue
+        exam=exams[sub['examId']]
+        try: dt=datetime.fromisoformat(sub['at'])
+        except (KeyError,ValueError,TypeError):continue
+        q=f'{dt.year} Q{(dt.month-1)//3+1}'
+        person=str(sub.get('employeeId',''))
+        name=str(sub.get('name',''))[:60]
+        max_points=sum(float(x.get('score',0)) for x in exam.get('qs',[]))
+        pct=100*float(sub.get('score',0))/max_points if max_points>0 else 0
+        board=quarters.setdefault(q,{}).setdefault(person,{'name':name,'points':0,'count':0})
+        board['name']=name
+        board['points']+=float(sub.get('score',0))
+        board['count']+=1
+        students.setdefault(person,[]).append((dt,round(pct,1),name))
+        cat=str(exam.get('category','综合'))[:60]
+        item=categories.setdefault(cat,{'name':cat,'count':0,'percentSum':0})
+        item['count']+=1
+        item['percentSum']+=pct
+        if isinstance(sub.get('durationSeconds'),(int,float)):
+            durations.append(sub['durationSeconds'])
+    rank=[{'quarter':q,'ranking':sorted(items.values(),key=lambda x:-x['points'])}
+          for q,items in sorted(quarters.items(),reverse=True)]
+    progress=[]
+    for attempts in students.values():
+        attempts.sort(key=lambda x:x[0])
+        if len(attempts)>1:
+            progress.append({'name':attempts[-1][2],'change':round(attempts[-1][1]-attempts[-2][1],1),
+                             'latest':attempts[-1][1],'previous':attempts[-2][1],'count':len(attempts)})
+    progress.sort(key=lambda x:-x['change'])
+    return {'quarters':rank,'improvements':progress[:30],
+            'review':{'gradedCount':sum(len(a) for a in students.values()),
+                      'activeStudents':len(students),
+                      'averageDuration':round(sum(durations)/len(durations)) if durations else None,
+                      'categories':[{'name':x['name'],'count':x['count'],
+                                     'average':round(x['percentSum']/x['count'],1)}
+                                    for x in sorted(categories.values(),key=lambda x:-x['count'])]}}
+
 def sanitized(db,admin):
     result=copy.deepcopy(db)
+    result['metrics']=report_metrics(db)
     if not admin:
         result['exams']=[e for e in result['exams'] if e.get('published')]
         for e in result['exams']:
