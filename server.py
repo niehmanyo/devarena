@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """DevArena: Python standard-library LAN service with JSON storage."""
-import argparse, copy, hashlib, hmac, json, os, pathlib, secrets, threading, uuid, base64, time, urllib.request, urllib.error, ssl, logging
+import argparse, copy, hashlib, hmac, json, os, pathlib, secrets, threading, uuid, base64, time, urllib.request, urllib.error, ssl, logging, math
 from http.cookies import SimpleCookie
 from urllib.parse import urlencode
 from datetime import datetime
@@ -115,6 +115,9 @@ def good_exam(e):
             value=q.get(field,'')
             if not isinstance(value,str) or len(value)>20000:
                 raise ValueError(f'题目字段 {field} 格式错误或内容过长')
+        if 'tags' in q:
+            if not isinstance(q['tags'],list) or len(q['tags'])>20 or any(not isinstance(t,str) or not t.strip() or len(t)>50 for t in q['tags']):
+                raise ValueError('知识点标签不合法')
         if not isinstance(q.get('attachments',[]),list):raise ValueError('附件字段无效')
         if q['type']!='text':
             opts=q.get('opts',[])
@@ -411,10 +414,29 @@ class Handler(BaseHTTPRequestHandler):
                     sub=next((s for s in db['submissions'] if s['id']==data.get('id')),None)
                     if not sub:raise ValueError('试卷不存在')
                     e=next(x for x in db['exams'] if x['id']==sub['examId'])
-                    max_manual=sum(float(q['score']) for q in e['qs'] if q['type']=='text')
-                    manual=float(data.get('manual',0))
-                    if not 0<=manual<=max_manual:raise ValueError('人工评分超出范围')
-                    sub.update(manual=manual,score=sub['objective']+manual,graded=True,feedback=str(data.get('feedback',''))[:3000])
+                    text_questions=[q for q in e['qs'] if q['type']=='text']
+                    max_manual=sum(float(q['score']) for q in text_questions)
+                    if 'questionScores' in data:
+                        incoming=data['questionScores']
+                        if not isinstance(incoming,dict):raise ValueError('逐题评分必须是对象')
+                        scores={}
+                        for q in text_questions:
+                            if q['id'] not in incoming:raise ValueError('请填写每道简答题的得分')
+                            try: val=float(incoming[q['id']])
+                            except (TypeError,ValueError):raise ValueError('评分必须是数字')
+                            if not math.isfinite(val) or val<0 or val>float(q['score']):
+                                raise ValueError('逐题得分不得超过题目分值')
+                            scores[q['id']]=val
+                        manual=sum(scores.values())
+                    else:
+                        # Compatibility for previously deployed scoring clients.
+                        try: manual=float(data.get('manual',0))
+                        except (TypeError,ValueError):raise ValueError('评分必须是数字')
+                        if not math.isfinite(manual) or not 0<=manual<=max_manual:
+                            raise ValueError('人工评分超出范围')
+                        scores=sub.get('questionScores',{})
+                    sub.update(manual=manual,score=sub['objective']+manual,graded=True,
+                               questionScores=scores,feedback=str(data.get('feedback',''))[:3000])
                     save(db);return self.reply(200,{'ok':True})
                 if path=='/api/delete-file':
                     fid=str(data.get('id',''))
