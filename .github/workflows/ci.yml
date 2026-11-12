@@ -1,0 +1,35 @@
+name: DevArena v6 checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate server and JSON format
+        run: |
+          python -m py_compile server.py
+          python -m json.tool app_config.json >/dev/null
+          bash -n start-background.sh
+          bash -n upgrade.sh
+      - name: Check embedded front-end JavaScript
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          page=Path('index.html').read_text(encoding='utf-8')
+          scripts=re.findall(r'<script[^>]*>(.*?)</script>',page,flags=re.S)
+          assert scripts, 'missing inline script'
+          Path('/tmp/devarena-check.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/devarena-check.js
+      - name: Test JSON compatibility and grading
+        run: python -m unittest discover -s tests -v

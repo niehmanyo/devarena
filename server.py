@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """DevArena: Python standard-library LAN service with JSON storage."""
-import argparse, copy, hashlib, hmac, json, os, pathlib, secrets, threading, uuid, base64, time, urllib.request, urllib.error, ssl, logging
+import argparse, copy, hashlib, hmac, json, os, pathlib, secrets, threading, uuid, base64, time, urllib.request, urllib.error, ssl, logging, math
 from http.cookies import SimpleCookie
 from urllib.parse import urlencode
 from datetime import datetime
@@ -67,8 +67,53 @@ def save(db):
     temp=DATA/('state-'+uuid.uuid4().hex+'.tmp')
     temp.write_text(json.dumps(db,ensure_ascii=False,indent=2),'utf-8')
     os.replace(temp,STATE)
+def report_metrics(db):
+    exams={e['id']:e for e in db.get('exams',[])}
+    quarters={}
+    students={}
+    categories={}
+    durations=[]
+    for sub in db.get('submissions',[]):
+        if not sub.get('graded') or sub.get('examId') not in exams:continue
+        exam=exams[sub['examId']]
+        try: dt=datetime.fromisoformat(sub['at'])
+        except (KeyError,ValueError,TypeError):continue
+        q=f'{dt.year} Q{(dt.month-1)//3+1}'
+        person=str(sub.get('employeeId',''))
+        name=str(sub.get('name',''))[:60]
+        max_points=sum(float(x.get('score',0)) for x in exam.get('qs',[]))
+        pct=100*float(sub.get('score',0))/max_points if max_points>0 else 0
+        board=quarters.setdefault(q,{}).setdefault(person,{'name':name,'points':0,'count':0})
+        board['name']=name
+        board['points']+=float(sub.get('score',0))
+        board['count']+=1
+        students.setdefault(person,[]).append((dt.timestamp(),round(pct,1),name))
+        cat=str(exam.get('category','综合'))[:60]
+        item=categories.setdefault(cat,{'name':cat,'count':0,'percentSum':0})
+        item['count']+=1
+        item['percentSum']+=pct
+        if isinstance(sub.get('durationSeconds'),(int,float)):
+            durations.append(sub['durationSeconds'])
+    rank=[{'quarter':q,'ranking':sorted(items.values(),key=lambda x:-x['points'])}
+          for q,items in sorted(quarters.items(),reverse=True)]
+    progress=[]
+    for attempts in students.values():
+        attempts.sort(key=lambda x:x[0])
+        if len(attempts)>1:
+            progress.append({'name':attempts[-1][2],'change':round(attempts[-1][1]-attempts[-2][1],1),
+                             'latest':attempts[-1][1],'previous':attempts[-2][1],'count':len(attempts)})
+    progress.sort(key=lambda x:-x['change'])
+    return {'quarters':rank,'improvements':progress[:30],
+            'review':{'gradedCount':sum(len(a) for a in students.values()),
+                      'activeStudents':len(students),
+                      'averageDuration':round(sum(durations)/len(durations)) if durations else None,
+                      'categories':[{'name':x['name'],'count':x['count'],
+                                     'average':round(x['percentSum']/x['count'],1)}
+                                    for x in sorted(categories.values(),key=lambda x:-x['count'])]}}
+
 def sanitized(db,admin):
     result=copy.deepcopy(db)
+    result['metrics']=report_metrics(db)
     if not admin:
         result['exams']=[e for e in result['exams'] if e.get('published')]
         for e in result['exams']:
@@ -111,10 +156,13 @@ def good_exam(e):
     for q in qs:
         if q.get('type') not in ('single','multi','text') or not str(q.get('title','')).strip() or float(q.get('score',0))<=0:raise ValueError('题目类型、内容或分值错误')
         # Optional fields: legacy JSON exams remain readable.
-        for field in ('description','scenario','requirements','deliverable','rubric','knowledge','difficulty','explain'):
+        for field in ('description','scenario','requirements','deliverable','rubric','knowledge','difficulty','category','explain'):
             value=q.get(field,'')
             if not isinstance(value,str) or len(value)>20000:
                 raise ValueError(f'题目字段 {field} 格式错误或内容过长')
+        if 'tags' in q:
+            if not isinstance(q['tags'],list) or len(q['tags'])>20 or any(not isinstance(t,str) or not t.strip() or len(t)>50 for t in q['tags']):
+                raise ValueError('知识点标签不合法')
         if not isinstance(q.get('attachments',[]),list):raise ValueError('附件字段无效')
         if q['type']!='text':
             opts=q.get('opts',[])
@@ -380,7 +428,7 @@ class Handler(BaseHTTPRequestHandler):
                         existing={'id':'a'+uuid.uuid4().hex,'examId':eid,'name':name,'employeeId':empid,'subject':p['subject'] if p else '', 'startedAt':iso_utc(),'startedTs':timestamp()}
                         attempts.append(existing)
                     save(db)
-                    return self.reply(200,{'attemptId':existing['id'],'startedAt':existing['startedAt'],'durationLimitSeconds':int(e.get('duration',60))*60,'files':[{'id':f['id'],'name':f['name'],'size':f['size']} for f in db['files'] if f.get('kind')=='submission' and f.get('attemptId')==existing['id']]})
+                    return self.reply(200,{'attemptId':existing['id'],'startedAt':existing['startedAt'],'durationLimitSeconds':int(e.get('duration',60))*60,'serverTime':timestamp(),'deadlineTime':min(existing['startedTs']+int(e.get('duration',60))*60,datetime.fromisoformat(e['end']).timestamp()),'files':[{'id':f['id'],'name':f['name'],'size':f['size']} for f in db['files'] if f.get('kind')=='submission' and f.get('attemptId')==existing['id']]})
                 if path=='/api/submit':
                     eid=str(data.get('examId','')); name=str(data.get('name','')).strip();empid=str(data.get('employeeId','')).strip();answers=data.get('answers',{})
                     if not name or len(name)>60 or not empid or len(empid)>40 or not isinstance(answers,dict):raise ValueError('姓名、工号或答案不合法')
@@ -411,10 +459,29 @@ class Handler(BaseHTTPRequestHandler):
                     sub=next((s for s in db['submissions'] if s['id']==data.get('id')),None)
                     if not sub:raise ValueError('试卷不存在')
                     e=next(x for x in db['exams'] if x['id']==sub['examId'])
-                    max_manual=sum(float(q['score']) for q in e['qs'] if q['type']=='text')
-                    manual=float(data.get('manual',0))
-                    if not 0<=manual<=max_manual:raise ValueError('人工评分超出范围')
-                    sub.update(manual=manual,score=sub['objective']+manual,graded=True,feedback=str(data.get('feedback',''))[:3000])
+                    text_questions=[q for q in e['qs'] if q['type']=='text']
+                    max_manual=sum(float(q['score']) for q in text_questions)
+                    if 'questionScores' in data:
+                        incoming=data['questionScores']
+                        if not isinstance(incoming,dict):raise ValueError('逐题评分必须是对象')
+                        scores={}
+                        for q in text_questions:
+                            if q['id'] not in incoming:raise ValueError('请填写每道简答题的得分')
+                            try: val=float(incoming[q['id']])
+                            except (TypeError,ValueError):raise ValueError('评分必须是数字')
+                            if not math.isfinite(val) or val<0 or val>float(q['score']):
+                                raise ValueError('逐题得分不得超过题目分值')
+                            scores[q['id']]=val
+                        manual=sum(scores.values())
+                    else:
+                        # Compatibility for previously deployed scoring clients.
+                        try: manual=float(data.get('manual',0))
+                        except (TypeError,ValueError):raise ValueError('评分必须是数字')
+                        if not math.isfinite(manual) or not 0<=manual<=max_manual:
+                            raise ValueError('人工评分超出范围')
+                        scores=sub.get('questionScores',{})
+                    sub.update(manual=manual,score=sub['objective']+manual,graded=True,
+                               questionScores=scores,feedback=str(data.get('feedback',''))[:3000])
                     save(db);return self.reply(200,{'ok':True})
                 if path=='/api/delete-file':
                     fid=str(data.get('id',''))
