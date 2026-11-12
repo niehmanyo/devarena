@@ -18,6 +18,19 @@ for file in server.py index.html start.sh start-background.sh; do
 done
 [[ -f "$TARGET/server.py" ]] || { echo "旧项目目录中缺少 server.py" >&2; exit 2; }
 
+# Check incoming code before interrupting an existing exam service.
+python3 -m py_compile "$SOURCE/server.py"
+bash -n "$SOURCE/start-background.sh"
+bash -n "$SOURCE/upgrade.sh"
+
+# Never overwrite a live manually managed service on the same port.
+if ! (cd "$TARGET" && [[ -f start-background.sh ]] && bash start-background.sh status >/dev/null 2>&1); then
+  if command -v ss >/dev/null 2>&1 && ss -lnt | grep -Eq "[:.]$PORT[[:space:]]"; then
+    echo "端口 $PORT 已被占用，且旧进程不是受 start-background.sh 管理。请先通过原方式停止服务再升级。" >&2
+    exit 1
+  fi
+fi
+
 # Validate persisted state BEFORE service restart or modifications.
 if [[ -f "$TARGET/data/state.json" ]]; then
   python3 - "$TARGET/data/state.json" <<'PY'
