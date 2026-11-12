@@ -47,14 +47,14 @@ DevArena 面向软件研发团队的持续技术能力建设，将 C++ Core Dump
 | 附件管理 | 上传考试文档、答案文档、题目截图及相关文件；单文件上限由 `app_config.json` 配置（默认 8 GB） |
 | 在线答题 | 学员录入姓名、工号，按考试时段开始与提交；同一场考试按工号避免重复提交 |
 | 学生文档答卷 | 考生可在考试中上传 PDF、Word、Markdown、ZIP、日志、Core Dump 等附件；提交后归档到答卷中，管理员可在阅卷页面下载 |
-| 阅卷评分 | 客观题自动评分；主观题由管理员填写总得分和评语 |
+| 阅卷评分 | 客观题自动评分；主观题支持逐题评分与快捷评语；旧答卷总分兼容 |
 | 考试计时 | 服务端记录开始、提交时间，统计每位学生的实际作答时长；刷新不重新计时 |
 | 排行榜 | 已完成评分的考试成绩累计为积分，按累计分排序 |
 | 答案公开 | 管理员控制标准答案与答案附件是否向学员公开 |
 | 企业登录 | 可选 OAuth2 Authorization Code + PKCE，支持员工身份字段和管理员白名单映射 |
 | 数据存储 | JSON 文件保存考试、答卷、积分来源和考试计时；本地目录保存附件 |
 
-**当前版本范围**：暂不提供个人主页；无数据库服务；不支持学生上传答卷附件；主观题以整份试卷的主观题总分评分（非逐题评分）。
+**当前版本范围**：暂不提供个人主页；无数据库服务；学生可上传答卷附件，提交后由管理员管理。
 
 ## 🧱 技术架构
 
@@ -86,18 +86,42 @@ Python 3 标准库 HTTP Server (server.py)
 ### 2. 获取代码
 
 ```bash
-git clone https://github.com/<YOUR_ORG>/<YOUR_REPO>.git
-cd <YOUR_REPO>
+# 克隆实际 GitHub 仓库
+git clone https://github.com/niehmanyo/devarena.git
+cd devarena
+
+# PR #4 尚未合并前，切换到 v6.0 功能分支
+git fetch origin
+git checkout feature/ux-exam-grading-insights-v6
+
+# PR 合并进 main 后，新部署改用：
+# git checkout main
+# git pull --ff-only origin main
 ```
 
-> 将占位符替换成你实际的 GitHub 仓库地址。如果下载的是 ZIP，解压并 `cd` 到包含 `server.py` 的目录即可。
+> 如果下载的是 ZIP，解压后进入包含 `server.py` 的目录。**公司内部建议使用 Private 仓库或符合公司代码管理要求的 Git 服务**；不要上传真实考试数据和 Core Dump 到公开仓库。
 
-### 3. 启动
+### 3. 安装依赖、检查环境与启动
+
+项目只依赖 Python 3 标准库，不需要 `pip install`、Node.js、MySQL 或 Redis。首次安装请执行：
 
 ```bash
-chmod +x start.sh
-./start.sh 8080
+# 查看 Python 版本，建议 Python 3.9+
+python3 --version
+
+# Linux（Debian / Ubuntu）若尚未安装 Git 和 Python：
+# sudo apt update
+# sudo apt install -y git python3
+
+# 检查程序与上传配置
+python3 -m py_compile server.py
+python3 -m json.tool app_config.json > /dev/null
+
+# 首次调试可以以前台方式启动
+bash start.sh 8080
 ```
+
+启动后若想退出前台服务，在当前终端按 `Ctrl+C`。**正式内网运行建议用下一节的 nohup 后台启动脚本，而不是同时启动多个实例。**
 
 打开 `http://127.0.0.1:8080`。内网其他电脑可访问：
 
@@ -114,6 +138,25 @@ python3 server.py --host 0.0.0.0 --port 8080
 ```
 
 **Windows：** 在目录下运行 `start.bat 8080`（需要 Python 3 和 `py` 启动器）。
+
+### 3A. 直接一条命令后台部署（推荐）
+
+首次下载并进入项目根目录后，配置文件默认允许单个附件 **8192 MiB（8 GiB）**。直接执行：
+
+```bash
+bash start-background.sh start 8080
+bash start-background.sh status
+tail -n 30 devarena.log
+```
+
+如果在其他同事的浏览器访问，请使用服务器的**内网 IP**，例如 `http://192.168.1.100:8080`（示例地址，实际需替换）。查看本机地址：
+
+```bash
+hostname -I
+ss -lntp | grep ':8080'
+```
+
+若端口无法访问，请检查 Linux 防火墙及公司网关策略；**只在获准访问的内部网络开放此端口**。如启用公司 OAuth2，应使用 HTTPS 内网域名和反向代理。
 
 ### 4. 配置最大上传文件大小（Core Dump）
 
@@ -198,6 +241,18 @@ sudo journalctl -u devarena -f
 
 此示例仅监听本机端口，预期由公司内网反向代理转发。如果不使用代理，请根据网络策略修改监听地址；确保运行用户对 `data/` 有写权限。
 
+### 常见安装问题
+
+| 现象 | 检查方法 |
+| --- | --- |
+| `python3: command not found` | 安装 Python 3，并确认 `python3 --version` 正常 |
+| `Address already in use` | 执行 `ss -lntp \| grep ':8080'`，检查是否启动了多个实例 |
+| 其他员工无法访问 | 核对服务器 IP、监听地址、内网防火墙/安全组及网关 |
+| 后台启动失败 | 执行 `tail -n 100 devarena.log` 查看报错 |
+| 上传返回 HTTP 413 | 同步调整 Nginx / 公司网关的 `client_max_body_size` |
+| 修改上传上限未生效 | 修改 `app_config.json` 后运行 `bash start-background.sh restart 8080` |
+| 升级后找不到旧考试 | 确认访问的是旧部署目录对应的服务，核对 `data/state.json`，不要覆盖备份 |
+
 ## 🔐 企业 OAuth2 接入
 
 平台已提供**标准 OAuth2 Authorization Code + PKCE** 的配置化适配，接入公司身份平台时不需要改写前端页面。
@@ -271,17 +326,19 @@ server {
 
 ## 🔄 现有考试数据平滑升级（Linux）
 
-**先在独立目录获取新版源码**，不要直接覆盖原安装目录的 `data/` 或 `oauth_config.json`。
+**不要在现有运行目录直接 `git pull` 覆盖程序和数据。** 在独立目录克隆新代码，使用升级脚本备份、检查后更新：
 
 ```bash
-# 示意：在 /tmp 下获取包含本功能的新版本
-git clone https://github.com/niehmanyo/devarena.git /tmp/devarena-new
-cd /tmp/devarena-new
-git checkout feature/student-documents-safe-upgrade
+# 获取 v6.0 新代码
+git clone https://github.com/niehmanyo/devarena.git /tmp/devarena-v6
+cd /tmp/devarena-v6
+git checkout feature/ux-exam-grading-insights-v6
 
-# /opt/devarena 是当前已经部署并持有历史数据的旧目录
+# 示例：已有服务位于 /opt/devarena，监听 8080
 bash upgrade.sh /opt/devarena 8080
 ```
+
+> 上面分支名称适用于 PR #4 尚未合并期间。合并后可改为 `git checkout main`。请将 `/opt/devarena` 替换成服务器真实项目路径。**升级前应结束正在进行的考试和上传，并在测试目录用生产数据备份验证。**
 
 升级脚本完成以下操作：
 
@@ -312,6 +369,7 @@ bash start-background.sh logs
 ├── server.py                    # Python HTTP / API / OAuth2 服务
 ├── start.sh                     # Linux / macOS 前台启动
 ├── start-background.sh          # Linux nohup 后台运行、停止和查看日志
+├── upgrade.sh                   # 保留旧数据的 Linux 升级脚本
 ├── app_config.json              # 上传上限（MB），默认 8192
 ├── start.bat                    # Windows 启动
 ├── oauth_config.example.json    # OAuth2 配置模板（不包含真实密钥）
@@ -352,8 +410,8 @@ cp -a data "data-backup-$(date +%Y%m%d-%H%M%S)"
 
 ## 🛠️ 后续规划
 
-- [ ] 逐题主观评分与评分细则
-- [ ] 学生上传分析报告 / Core Dump 附件
+- [x] 逐题主观评分与快捷评语
+- [x] 学生上传分析报告 / Core Dump 附件
 - [ ] 个人成长档案与能力趋势
 - [ ] 管理员导出成绩与考试用时（CSV / Excel）
 - [ ] OAuth2 与公司实际身份平台联调
