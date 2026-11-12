@@ -428,7 +428,7 @@ class Handler(BaseHTTPRequestHandler):
                         existing={'id':'a'+uuid.uuid4().hex,'examId':eid,'name':name,'employeeId':empid,'subject':p['subject'] if p else '', 'startedAt':iso_utc(),'startedTs':timestamp()}
                         attempts.append(existing)
                     save(db)
-                    return self.reply(200,{'attemptId':existing['id'],'startedAt':existing['startedAt'],'durationLimitSeconds':int(e.get('duration',60))*60,'files':[{'id':f['id'],'name':f['name'],'size':f['size']} for f in db['files'] if f.get('kind')=='submission' and f.get('attemptId')==existing['id']]})
+                    return self.reply(200,{'attemptId':existing['id'],'startedAt':existing['startedAt'],'durationLimitSeconds':int(e.get('duration',60))*60,'serverTime':timestamp(),'deadlineTime':min(existing['startedTs']+int(e.get('duration',60))*60,datetime.fromisoformat(e['end']).timestamp()),'files':[{'id':f['id'],'name':f['name'],'size':f['size']} for f in db['files'] if f.get('kind')=='submission' and f.get('attemptId')==existing['id']]})
                 if path=='/api/submit':
                     eid=str(data.get('examId','')); name=str(data.get('name','')).strip();empid=str(data.get('employeeId','')).strip();answers=data.get('answers',{})
                     if not name or len(name)>60 or not empid or len(empid)>40 or not isinstance(answers,dict):raise ValueError('姓名、工号或答案不合法')
