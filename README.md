@@ -378,3 +378,51 @@ cp -a data "data-backup-$(date +%Y%m%d-%H%M%S)"
 - **评分标准**：明确各评分点及分值；供管理员阅卷时参考。
 
 上述字段为可选字段，保存在 `data/state.json` 的各考试 `qs` 题目对象中；旧版考试记录无需迁移。考生答题、管理员预览与阅卷页面均会展示这些描述。题目截图及相关文件仍在保存考试后通过附件管理上传，并关联到对应题目。
+
+## 🚀 v6.0 用户体验优化
+
+本版本不增加外部数据库，仍采用原来的 `data/state.json` 和 `data/uploads/`，支持旧考试、旧成绩与旧附件继续使用。
+
+### 学生答题体验
+
+- **倒计时**：开始考试时服务端返回实际截止时间（答题限时与考试统一结束时间两者取较早值），页面固定显示剩余时间，并在 10、5、1 分钟时显示提醒。时间到后由服务端执行超时校验；**不会声称自动提交成功**。
+- **上传进度**：学生与管理员上传附件时显示已上传百分比，服务器仍采用分块文件接收。提交前若附件尚在上传，会提示等待。
+- **提交前检查**：汇总已答题数、未答题数、附件数、姓名与工号，再确认正式提交。
+- **Markdown/C++**：支持标题、列表、加粗、行内代码以及 fenced code block（例如 `\`\`\`cpp`），C++ 关键字、注释和字符串高亮。用户内容先进行 HTML 转义，不把文档当成可执行 HTML。
+
+### 管理员阅卷与知识库
+
+- **逐题评分**：管理员为每一道主观题输入得分，服务端逐题校验 0～题目满分，重新计算主观题总分并累计客观题得分；快捷评语可添加常用反馈。
+- **历史评分兼容**：旧答卷仅有 `manual` 总分但没有 `questionScores` 时，**不自动拆分或改写原成绩**；只有管理员主动重新逐题评分后才写入新字段。
+- **分类与检索**：考试原有 `category` 保留，题目可额外设置 `category` 和 `tags` 数组；题库搜索支持考试名称、技术分类、题目标题、场景和知识点。旧题目没有这两个字段仍可显示。
+- **训练统计**：季度积分榜按已评分答卷的提交时间归属季度；进步榜按同一工号最近两场已评分考试的**得分率百分点变化**计算；复盘统计展示技术方向的平均得分率、已评分答卷数和考试平均用时。
+
+### 已部署 Linux 平滑升级
+
+不需要重新导入 JSON，也不需要删除任何现有考试。使用仓库中已有的 `upgrade.sh`，它会备份当前代码、`data/` 以及配置，校验后替换程序，并通过 `start-background.sh` 重新拉起网站。
+
+```bash
+# 从单独的新目录执行，不要从当前运行目录直接覆盖
+git clone https://github.com/niehmanyo/devarena.git /tmp/devarena-v6
+cd /tmp/devarena-v6
+git checkout feature/ux-exam-grading-insights-v6
+
+# 用实际项目目录替换 /opt/devarena
+bash upgrade.sh /opt/devarena 8080
+```
+
+**升级前提：** 推荐先在测试目录恢复一份现有的 `data/`，验证考试、成绩和附件全部完整。生产升级会短暂停止服务，不是零停机。手工 `nohup` 或 systemd 启动的旧进程需要通过原方式先停止；脚本只自动管理由 `start-background.sh` 拉起的进程。升级期间暂停员工答题与上传。
+
+升级脚本保留现有 `app_config.json`、`oauth_config.json`、`data/state.json` 和 `data/uploads/`，备份保存在旧项目同级的 `devarena-backups/`。历史数据不需要字段迁移，新版新增的 `questionScores`、`tags` 等字段按需写入。
+
+### 验收与回归测试
+
+```bash
+python3 -m py_compile server.py
+python3 -m unittest discover -s tests -v
+bash -n start-background.sh
+bash -n upgrade.sh
+```
+
+仓库的 `.github/workflows/ci.yml` 还会执行 JavaScript 语法检查。请在内网用模拟数据实际检查倒计时、到期提醒、大文件进度、逐题保存评分和统计结果。
+
